@@ -15,6 +15,12 @@ extern crate alloc;
 use stylus_sdk::alloy_primitives::{Address, U256};
 use stylus_sdk::console;
 use stylus_sdk::prelude::*;
+use alloy_sol_types::sol;
+
+// Define the event using the sol! macro
+sol! {
+    event CupcakeDistributed(address indexed recipient, uint256 indexed timestamp, uint256 new_balance);
+}
 
 sol_storage! {
     #[entrypoint]
@@ -50,6 +56,14 @@ impl VendingMachine {
             // Update the distribution time to the current time.
             let mut time_accessor = self.cupcake_distribution_times.setter(user_address);
             time_accessor.set(U256::from(new_distribution_time));
+
+            // Emit the CupcakeDistributed event
+            log(self.vm(), CupcakeDistributed {
+                recipient: user_address,
+                timestamp: U256::from(new_distribution_time),
+                new_balance: balance,
+            });
+
             return Ok(true);
         } else {
             // User must wait before receiving another cupcake.
@@ -222,6 +236,75 @@ mod test {
         assert_eq!(
             contract.get_cupcake_balance_for(user).unwrap(),
             U256::from(2)
+        );
+
+        // SECTION 8: Testing Event Logs
+        // -----------------------------
+
+        // Test that events are emitted when cupcakes are distributed
+        let vm_logs = TestVM::new();
+        let mut contract_logs = VendingMachine::from(&vm_logs);
+        let user_logs = address!("0xCDC41bff86a62716f050622325CC17a317f99404");
+
+        // Set initial timestamp to ensure we can give a cupcake
+        vm_logs.set_block_timestamp(100);
+
+        // Give a cupcake to the user - this should emit an event
+        let result = contract_logs.give_cupcake_to(user_logs).unwrap();
+        assert!(result, "Should successfully give first cupcake");
+
+        // Get all emitted logs from the VM
+        let logs = vm_logs.get_emitted_logs();
+
+        // Verify that exactly one event was emitted
+        assert_eq!(logs.len(), 1, "Should emit exactly one CupcakeDistributed event");
+
+        // Calculate the expected event signature for CupcakeDistributed
+        // Event signature: CupcakeDistributed(address indexed recipient, uint256 indexed timestamp, uint256 new_balance)
+        // The signature is calculated as: keccak256("CupcakeDistributed(address,uint256,uint256)")
+        use alloy_primitives::hex;
+        use stylus_sdk::alloy_primitives::B256;
+        let event_signature: B256 =
+            hex!("c12a96437276bfca30ffd7a90b5e9d233c71c97f759c3b76b886f29e87989bb2").into();
+
+        // Check the first topic (event signature)
+        assert_eq!(
+            logs[0].0[0],
+            event_signature,
+            "First topic should be the event signature"
+        );
+
+        // Extract the indexed recipient address from the second topic
+        let recipient_topic = logs[0].0[1];
+        let recipient_bytes: [u8; 32] = recipient_topic.into();
+
+        // Indexed addresses are padded to 32 bytes - extract the last 20 bytes
+        let mut recipient_address = [0u8; 20];
+        recipient_address.copy_from_slice(&recipient_bytes[12..32]);
+
+        // Verify the recipient address matches our user
+        assert_eq!(
+            Address::from(recipient_address),
+            user_logs,
+            "Event recipient should match the user who received the cupcake"
+        );
+
+        // The new_balance is not indexed, so it's in the data field
+        let log_data = &logs[0].1;
+
+        // For a single uint256, it should be 32 bytes
+        assert_eq!(log_data.len(), 32, "Event data should contain one uint256 (32 bytes)");
+
+        // Convert the data bytes to U256
+        let mut balance_bytes = [0u8; 32];
+        balance_bytes.copy_from_slice(&log_data[0..32]);
+        let new_balance = U256::from_be_bytes(balance_bytes);
+
+        // Verify the balance is 1 (first cupcake)
+        assert_eq!(
+            new_balance,
+            U256::from(1),
+            "Event should show new balance of 1 cupcake"
         );
     }
 }
